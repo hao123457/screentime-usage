@@ -9,3 +9,4 @@ STARTUP_DIR = os.path.join(
     os.getenv("APPDATA", ""),
     r"Microsoft\Windows\Start Menu\Programs\Startup"
 )
+ICON_PATH = os.path.join(BASE_DIR, "testify.png")

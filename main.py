@@ -1,9 +1,7 @@
 import tkinter as tk
 import threading
 import os
-import sys
 
-from config import DB_PATH
 from database import init_db
 from tracker import Tracker
 from gui import UsageWindow
@@ -15,11 +13,11 @@ def main():
 
     init_db()
 
-    tracker = Tracker()
-    tracker.start()
-
     root = tk.Tk()
     root.withdraw()
+
+    tracker = Tracker()
+    tracker.start(root)
 
     gui = UsageWindow(root, script_path)
 
@@ -39,7 +37,6 @@ def main():
 
     tray = create_tray(on_open, on_exit)
 
-    # handle window close -> hide to tray instead of exit
     root.protocol("WM_DELETE_WINDOW", lambda: root.withdraw())
 
     tray_thread = threading.Thread(target=tray.run, daemon=True)
