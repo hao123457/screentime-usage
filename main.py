@@ -2,10 +2,26 @@ import tkinter as tk
 import threading
 import os
 
+from PIL import Image, ImageTk
+
 from database import init_db
 from tracker import Tracker
 from gui import UsageWindow
 from tray_icon import create_tray
+from config import ICON_PATH
+
+
+def _set_window_icon(root):
+    try:
+        img = Image.open(ICON_PATH).convert("RGBA")
+        src_size = min(img.width, img.height)
+        img = img.crop((0, 0, src_size, src_size))
+        img = img.resize((32, 32), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        root.iconphoto(True, photo)
+        root._icon_photo = photo  # prevent GC
+    except Exception:
+        pass
 
 
 def main():
@@ -15,6 +31,8 @@ def main():
 
     root = tk.Tk()
     root.withdraw()
+
+    _set_window_icon(root)
 
     tracker = Tracker()
     tracker.start(root)
