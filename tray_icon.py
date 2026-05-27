@@ -1,35 +1,20 @@
-from PIL import Image, ImageDraw
+from PIL import Image
 import pystray
 
+from config import ICON_PATH
 
-def _create_icon_image():
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
 
-    # clock circle
-    draw.ellipse([4, 4, 60, 60], outline="#2196F3", width=3)
-
-    # hour markers
-    for i in range(12):
-        import math
-        angle = math.radians(i * 30 - 90)
-        x1 = 32 + 22 * math.cos(angle)
-        y1 = 32 + 22 * math.sin(angle)
-        x2 = 32 + 26 * math.cos(angle)
-        y2 = 32 + 26 * math.sin(angle)
-        draw.line([x1, y1, x2, y2], fill="#2196F3", width=2)
-
-    # hour hand (pointing roughly at 10)
-    draw.line([32, 32, 24, 18], fill="#1976D2", width=4)
-
-    # minute hand (pointing roughly at 2)
-    draw.line([32, 32, 44, 22], fill="#1976D2", width=3)
-
-    # center dot
-    draw.ellipse([29, 29, 35, 35], fill="#1565C0")
-
-    return img
+def _load_icon_image():
+    """Load testify2.png, crop top square, resize to 64x64 for tray."""
+    try:
+        img = Image.open(ICON_PATH).convert("RGBA")
+        src_size = min(img.width, img.height)
+        img = img.crop((0, 0, src_size, src_size))
+        img = img.resize((64, 64), Image.LANCZOS)
+        return img
+    except Exception:
+        # fallback: simple colored square
+        return Image.new("RGB", (64, 64), "#2196F3")
 
 
 def create_tray(on_open, on_exit):
@@ -39,7 +24,7 @@ def create_tray(on_open, on_exit):
     )
     icon = pystray.Icon(
         "UsageTracker",
-        _create_icon_image(),
+        _load_icon_image(),
         "应用使用时间追踪",
         menu,
     )

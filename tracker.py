@@ -1,5 +1,3 @@
-import threading
-import time
 from datetime import date
 from ctypes import Structure, windll, c_uint, sizeof, byref
 
@@ -30,7 +28,7 @@ def _foreground_process_name():
         return None, None
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        name = psutil.Process(pid).name()
+        name = psutil.Process(pid).name().removesuffix(".exe")
         title = win32gui.GetWindowText(hwnd)
         return name, title
     except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -40,44 +38,53 @@ def _foreground_process_name():
 class Tracker:
     def __init__(self):
         self._running = False
-        self._thread = None
+        self._after_id = None
+        self._current_proc = None
+        self._current_title = None
+        self._accumulated = 0
 
-    def start(self):
+    def start(self, root):
         self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        self._current_proc = None
+        self._current_title = None
+        self._accumulated = 0
+        self._schedule(root)
 
     def stop(self):
         self._running = False
+        if self._after_id is not None:
+            try:
+                # after_cancel may fail if called after the callback fired
+                pass  # _poll will check self._running and stop scheduling
+            except Exception:
+                pass
 
-    def _loop(self):
-        current_proc = None
-        current_title = None
-        accumulated = 0
+    def _schedule(self, root):
+        if not self._running:
+            return
+        self._after_id = root.after(POLL_INTERVAL * 1000, lambda: self._poll(root))
 
-        while self._running:
-            time.sleep(POLL_INTERVAL)
+    def _poll(self, root):
+        if not self._running:
+            return
 
-            idle = _idle_seconds()
-            if idle > IDLE_THRESHOLD:
-                # flush current session if any
-                if accumulated > 0 and current_proc:
-                    add_usage(str(date.today()), current_proc, current_title, accumulated)
-                    accumulated = 0
-                    current_proc = None
-                    current_title = None
-                continue
-
+        idle = _idle_seconds()
+        if idle > IDLE_THRESHOLD:
+            if self._accumulated > 0 and self._current_proc:
+                add_usage(str(date.today()), self._current_proc, self._current_title, self._accumulated)
+                self._accumulated = 0
+                self._current_proc = None
+                self._current_title = None
+        else:
             proc_name, win_title = _foreground_process_name()
-            if proc_name is None:
-                continue
+            if proc_name is not None:
+                if proc_name == self._current_proc:
+                    self._accumulated += POLL_INTERVAL
+                else:
+                    if self._accumulated > 0 and self._current_proc:
+                        add_usage(str(date.today()), self._current_proc, self._current_title, self._accumulated)
+                    self._current_proc = proc_name
+                    self._current_title = win_title
+                    self._accumulated = POLL_INTERVAL
 
-            if proc_name == current_proc:
-                accumulated += POLL_INTERVAL
-            else:
-                # flush previous
-                if accumulated > 0 and current_proc:
-                    add_usage(str(date.today()), current_proc, current_title, accumulated)
-                current_proc = proc_name
-                current_title = win_title
-                accumulated = POLL_INTERVAL
+        self._schedule(root)

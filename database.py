@@ -1,12 +1,19 @@
 import sqlite3
 import threading
+import os
 from config import DB_PATH
 
 _local = threading.local()
 
+# Path of old database (was in app directory) — checked once for migration
+_OLD_DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "usage.db"
+)
+
 
 def _conn():
     if not hasattr(_local, "conn") or _local.conn is None:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         _local.conn = sqlite3.connect(DB_PATH)
     return _local.conn
 
@@ -27,6 +34,30 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_date ON usage_logs(date)
     """)
     c.commit()
+    _migrate_old_db(c)
+
+
+def _migrate_old_db(conn):
+    """Copy data from old DB location to new unified location, one-time."""
+    if not os.path.exists(_OLD_DB_PATH):
+        return
+    if _OLD_DB_PATH == DB_PATH:
+        return
+
+    try:
+        old_conn = sqlite3.connect(_OLD_DB_PATH)
+        rows = old_conn.execute(
+            "SELECT id, date, process_name, window_title, duration_seconds, recorded_at FROM usage_logs"
+        ).fetchall()
+        old_conn.close()
+        conn.executemany(
+            "INSERT OR IGNORE INTO usage_logs (id, date, process_name, window_title, duration_seconds, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        os.rename(_OLD_DB_PATH, _OLD_DB_PATH + ".migrated")
+    except Exception:
+        pass
 
 
 def add_usage(date, process_name, window_title, duration_seconds):
