@@ -95,3 +95,15 @@ def get_available_dates():
         "SELECT DISTINCT date FROM usage_logs ORDER BY date DESC"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def export_csv(filepath):
+    import csv
+    c = _conn()
+    rows = c.execute(
+        "SELECT date, process_name, window_title, duration_seconds, recorded_at FROM usage_logs ORDER BY date DESC, recorded_at DESC"
+    )
+    with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["日期", "应用名称", "窗口标题", "时长(秒)", "记录时间"])
+        w.writerows(rows)

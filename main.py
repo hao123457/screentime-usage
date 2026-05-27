@@ -8,7 +8,7 @@ from database import init_db
 from tracker import Tracker
 from gui import UsageWindow
 from tray_icon import create_tray
-from config import ICON_PATH
+from config import ICON_PATH, START_MINIMIZED
 
 
 def _set_window_icon(root):
@@ -36,7 +36,7 @@ def main():
     tracker = Tracker()
     tracker.start(root)
 
-    gui = UsageWindow(root, script_path)
+    gui = UsageWindow(root, script_path, tracker)
 
     def on_open():
         root.after(0, _show_window)
@@ -53,6 +53,9 @@ def main():
         root.after(0, root.destroy)
 
     tray = create_tray(on_open, on_exit)
+
+    if START_MINIMIZED:
+        root.withdraw()
 
     root.protocol("WM_DELETE_WINDOW", lambda: root.withdraw())
 

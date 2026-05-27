@@ -5,7 +5,7 @@ import psutil
 import win32gui
 import win32process
 
-from config import POLL_INTERVAL, IDLE_THRESHOLD
+from config import load_settings
 from database import add_usage
 
 
@@ -42,6 +42,9 @@ class Tracker:
         self._current_proc = None
         self._current_title = None
         self._accumulated = 0
+        s = load_settings()
+        self.poll_interval = s["poll_interval"]
+        self.idle_threshold = s["idle_threshold"]
 
     def start(self, root):
         self._running = True
@@ -52,24 +55,22 @@ class Tracker:
 
     def stop(self):
         self._running = False
-        if self._after_id is not None:
-            try:
-                # after_cancel may fail if called after the callback fired
-                pass  # _poll will check self._running and stop scheduling
-            except Exception:
-                pass
+
+    def update_settings(self, poll_interval, idle_threshold):
+        self.poll_interval = poll_interval
+        self.idle_threshold = idle_threshold
 
     def _schedule(self, root):
         if not self._running:
             return
-        self._after_id = root.after(POLL_INTERVAL * 1000, lambda: self._poll(root))
+        self._after_id = root.after(self.poll_interval * 1000, lambda: self._poll(root))
 
     def _poll(self, root):
         if not self._running:
             return
 
         idle = _idle_seconds()
-        if idle > IDLE_THRESHOLD:
+        if idle > self.idle_threshold:
             if self._accumulated > 0 and self._current_proc:
                 add_usage(str(date.today()), self._current_proc, self._current_title, self._accumulated)
                 self._accumulated = 0
@@ -79,12 +80,12 @@ class Tracker:
             proc_name, win_title = _foreground_process_name()
             if proc_name is not None:
                 if proc_name == self._current_proc:
-                    self._accumulated += POLL_INTERVAL
+                    self._accumulated += self.poll_interval
                 else:
                     if self._accumulated > 0 and self._current_proc:
                         add_usage(str(date.today()), self._current_proc, self._current_title, self._accumulated)
                     self._current_proc = proc_name
                     self._current_title = win_title
-                    self._accumulated = POLL_INTERVAL
+                    self._accumulated = self.poll_interval
 
         self._schedule(root)
