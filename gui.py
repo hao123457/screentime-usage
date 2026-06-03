@@ -2,9 +2,13 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import date, timedelta
 import os
+import subprocess
+
+import psutil
 
 from config import STARTUP_DIR, load_settings
 from database import get_daily_summary, get_daily_total, get_available_dates
+from tracker import _friendly_name
 
 BAT_NAME = "app_usage_tracker.bat"
 
@@ -14,6 +18,25 @@ def _secs_to_hms(seconds):
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h}h {m}m {s}s"
+
+
+def _find_exe_path(friendly_name_str):
+    """Find the executable path of a running process whose friendly name matches.
+
+    Iterates all running processes, resolves each to a friendly name using
+    the same logic as the tracker, and returns the exe path of the first
+    match. Returns None if no matching running process is found.
+    """
+    for proc in psutil.process_iter(['pid']):
+        try:
+            friendly = _friendly_name(proc.pid)
+            if friendly == friendly_name_str:
+                exe = proc.exe()
+                if exe and os.path.isfile(exe):
+                    return exe
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
 
 
 def _startup_bat_path():
@@ -95,6 +118,8 @@ class UsageWindow:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
+
         # total label
         self.total_label = tk.Label(root, font=("", 11, "bold"), anchor=tk.W)
         self.total_label.pack(pady=5, padx=10, fill=tk.X)
@@ -147,6 +172,41 @@ class UsageWindow:
                 continue
             pct = f"{secs / self._total * 100:.1f}%" if self._total > 0 else "—"
             self.tree.insert("", tk.END, values=(proc, pct, _secs_to_hms(secs)))
+
+    def _on_tree_right_click(self, event):
+        """Show context menu on right-click in the Treeview."""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        self.tree.selection_set(item)
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="查看应用位置",
+            command=lambda: self._view_app_location(item)
+        )
+        menu.post(event.x_root, event.y_root)
+
+    def _view_app_location(self, item_id):
+        """Open Explorer to show the location of the selected app's executable."""
+        values = self.tree.item(item_id, "values")
+        if not values:
+            return
+        app_name = values[0]
+
+        exe_path = _find_exe_path(app_name)
+        if exe_path:
+            try:
+                subprocess.Popen(['explorer', '/select,', exe_path])
+            except Exception:
+                tk.messagebox.showerror(
+                    "错误",
+                    f"无法打开文件位置:\n{exe_path}"
+                )
+        else:
+            tk.messagebox.showinfo(
+                "未找到",
+                f"应用 \"{app_name}\" 当前未运行，无法定位其可执行文件路径。"
+            )
 
     def _toggle_startup(self):
         _set_startup(self.startup_var.get(), self.script_path)

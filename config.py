@@ -17,6 +17,32 @@ STARTUP_DIR = os.path.join(
 )
 ICON_PATH = os.path.join(BASE_DIR, "testify2.png")
 
+# Static fallback for system processes whose FileDescription may be
+# unavailable or unhelpful.  Most apps are resolved automatically via
+# the exe's version-info FileDescription field in tracker.py.
+PROCESS_NAME_MAP = {
+    "applicationframehost": "Settings",
+    "conhost": "Windows Console",
+    "dwm": "Desktop Window Manager",
+    "explorer": "File Explorer",
+    "lockapp": "Windows Lock Screen",
+    "mstsc": "Remote Desktop",
+    "openwith": "Open With",
+    "pickerhost": "File Picker",
+    "searchhost": "Windows Search",
+    "shellexperiencehost": "Windows Shell",
+    "snippingtool": "Snipping Tool",
+    "startmenuexperiencehost": "Start Menu",
+    "windowsterminal": "Windows Terminal",
+}
+
+
+def get_friendly_name(proc_name):
+    """将进程名映射为友好名称，无匹配时返回原值。"""
+    key = proc_name.lower().removesuffix(".exe")
+    return PROCESS_NAME_MAP.get(key, proc_name)
+
+
 _DEFAULTS = {
     "poll_interval": 3,
     "idle_threshold": 300,
