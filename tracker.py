@@ -9,7 +9,7 @@ import win32gui
 import win32process
 
 from config import load_settings, get_friendly_name
-from database import add_usage
+from database import add_usage, upsert_process_info
 
 
 class LASTINPUTINFO(Structure):
@@ -78,16 +78,45 @@ def _friendly_name(pid):
 
 
 def _foreground_process_name():
+    """Return (friendly_name, window_title, exe_path) for the foreground app.
+
+    Returns (None, None, None) if the window or process can't be read.
+    """
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
-        return None, None
+        return None, None, None
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         title = win32gui.GetWindowText(hwnd)
-        name = _friendly_name(pid) or title or "Unknown"
-        return name, title
+
+        # Resolve friendly name AND exe path in one psutil call
+        exe_path = None
+        try:
+            proc = psutil.Process(pid)
+            exe_path = proc.exe()
+            raw_name = proc.name().removesuffix(".exe")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            raw_name = None
+
+        if raw_name:
+            # 1. Prefer FileDescription from exe version info
+            if exe_path:
+                desc = _get_file_description(exe_path)
+                if desc:
+                    return desc, title, exe_path
+
+            # 2. Fall back to static mapping
+            friendly = get_friendly_name(raw_name)
+            if friendly != raw_name:
+                return friendly, title, exe_path
+
+            # 3. Return raw process name
+            return raw_name, title, exe_path
+
+        name = title or "Unknown"
+        return name, title, exe_path
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None, None
+        return None, None, None
 
 
 class Tracker:
@@ -132,8 +161,10 @@ class Tracker:
                 self._current_proc = None
                 self._current_title = None
         else:
-            proc_name, win_title = _foreground_process_name()
+            proc_name, win_title, exe_path = _foreground_process_name()
             if proc_name is not None:
+                if exe_path:
+                    upsert_process_info(proc_name, exe_path)
                 if proc_name == self._current_proc:
                     self._accumulated += self.poll_interval
                 else:

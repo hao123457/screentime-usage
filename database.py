@@ -33,6 +33,14 @@ def init_db():
     c.execute("""
         CREATE INDEX IF NOT EXISTS idx_date ON usage_logs(date)
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS process_info (
+            process_name TEXT PRIMARY KEY,
+            exe_path     TEXT NOT NULL,
+            first_seen   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     c.commit()
     _migrate_old_db(c)
 
@@ -71,6 +79,28 @@ def add_usage(date, process_name, window_title, duration_seconds):
     c.commit()
 
 
+def upsert_process_info(process_name, exe_path):
+    """Record a process_name → exe_path mapping for later icon lookup."""
+    c = _conn()
+    c.execute(
+        "INSERT INTO process_info (process_name, exe_path, last_seen) "
+        "VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(process_name) DO UPDATE SET "
+        "exe_path = excluded.exe_path, last_seen = CURRENT_TIMESTAMP",
+        (process_name, exe_path),
+    )
+    c.commit()
+
+
+def get_all_process_info():
+    """Return {process_name: exe_path} for all known apps."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT process_name, exe_path FROM process_info"
+    ).fetchall()
+    return dict(rows)
+
+
 def get_daily_summary(date):
     c = _conn()
     rows = c.execute(
@@ -95,6 +125,32 @@ def get_available_dates():
         "SELECT DISTINCT date FROM usage_logs ORDER BY date DESC"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def get_range_summary(start_date, end_date):
+    """Return (process_name, total_seconds) grouped across a date range.
+
+    Dates are inclusive: [start_date, end_date].
+    """
+    c = _conn()
+    rows = c.execute(
+        "SELECT process_name, SUM(duration_seconds) FROM usage_logs "
+        "WHERE date >= ? AND date <= ? "
+        "GROUP BY process_name ORDER BY SUM(duration_seconds) DESC",
+        (start_date, end_date),
+    ).fetchall()
+    return rows
+
+
+def get_range_total(start_date, end_date):
+    """Return total seconds across a date range."""
+    c = _conn()
+    row = c.execute(
+        "SELECT COALESCE(SUM(duration_seconds), 0) FROM usage_logs "
+        "WHERE date >= ? AND date <= ?",
+        (start_date, end_date),
+    ).fetchone()
+    return row[0]
 
 
 def export_csv(filepath):

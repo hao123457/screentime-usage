@@ -47,12 +47,16 @@ def main():
         root.focus_force()
         gui._refresh()
 
+    def on_settings():
+        root.after(0, _show_window)
+        root.after(100, gui._open_settings)
+
     def on_exit():
         tracker.stop()
         tray.stop()
         root.after(0, root.destroy)
 
-    tray = create_tray(on_open, on_exit)
+    tray = create_tray(on_open, on_settings, on_exit)
 
     if START_MINIMIZED:
         root.withdraw()

@@ -17,10 +17,22 @@ def _load_icon_image():
         return Image.new("RGB", (64, 64), "#2196F3")
 
 
-def create_tray(on_open, on_exit):
+def create_tray(on_open, on_settings, on_exit):
+    """Create the system tray icon.
+
+    Left-click (or double-click on older pystray versions) fires the
+    default menu item to open the statistics panel.  Right-click shows
+    the full context menu.
+    """
     menu = pystray.Menu(
-        pystray.MenuItem("打开统计面板", lambda: on_open()),
-        pystray.MenuItem("退出", lambda: on_exit()),
+        pystray.MenuItem(
+            "打开统计面板",
+            lambda icon, item: on_open(),
+            default=True,  # left-click / double-click → open
+        ),
+        pystray.MenuItem("设置...", lambda icon, item: on_settings()),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("退出", lambda icon, item: on_exit()),
     )
     icon = pystray.Icon(
         "UsageTracker",

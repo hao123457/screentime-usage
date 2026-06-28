@@ -1,4 +1,4 @@
-# ScreenTime Usage
+# App Usage Tracker — 应用使用时间追踪器
 
 Windows 桌面应用使用时间追踪器。后台静默记录每天各应用的使用时长，系统托盘常驻，图形化界面查看统计。
 
@@ -6,12 +6,15 @@ Windows 桌面应用使用时间追踪器。后台静默记录每天各应用的
 
 - **后台静默追踪** — 每 3 秒检测前台窗口，自动记录应用名称与窗口标题
 - **空闲检测** — 5 分钟无键鼠操作自动暂停，数据真实不虚增
-- **系统托盘常驻** — 最小化到托盘，自定义图标，不影响工作
-- **日报统计** — 按日期查看各应用使用时长占比与排名
+- **系统托盘常驻** — 左键单击打开面板，右键菜单：打开/设置/退出
+- **多视图统计** — 日/周/月三种聚合视图，日期导航
+- **应用图标** — 自动提取 exe 真实图标，未运行应用显示彩色默认图标
+- **柱状图可视化** — Top 10 应用横向柱状图，时长一目了然
 - **搜索过滤** — 输入关键字即时过滤应用列表
-- **历史记录** — 下拉框快速跳转到任意有记录的历史日期
-- **设置面板** — 可配置轮询间隔、空闲阈值、启动行为
-- **数据导出** — 一键导出 CSV，Excel 直接打开
+- **历史跳转** — 下拉框快速跳转到任意有记录的历史日期
+- **设置面板** — 多标签页：追踪配置 / 帮助 / 更新日志 / 关于
+- **数据导出** — 一键导出 CSV，Excel 直接打开（UTF-8 BOM 编码）
+- **亮暗主题** — 一键切换亮色/暗色主题，自适应标签
 - **开机自启** — 勾选即写入 Windows 启动文件夹
 
 ## 快速开始
@@ -21,7 +24,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-或运行预构建的 `dist/AppUsageTracker.exe`（单文件，约 19MB），双击即可。
+或双击 `AppUsageTracker.exe`（单文件，约 20MB），桌面快捷方式已自动创建。
 
 自行构建：
 
@@ -34,43 +37,55 @@ pyinstaller AppUsageTracker.spec
 
 | 操作 | 说明 |
 |------|------|
-| 启动程序 | 统计面板直接打开，后台开始记录 |
+| 启动程序 | 统计面板打开，后台开始记录 |
+| 日 / 周 / 月 | 切换统计视图聚合维度 |
+| ◀ ▶ | 前一天/后一天（周、月模式下按周/月切换） |
+| 今天 | 快速跳转到今天 |
 | 搜索框 | 输入字母/汉字即时过滤应用 |
-| 设置按钮 | 配置追踪参数、导出 CSV |
-| 右键托盘 → 打开统计面板 | 从托盘恢复窗口 |
+| ⚙ 设置 | 打开设置窗口（追踪参数/帮助/更新日志/关于） |
+| 左键托盘 | 打开统计面板 |
+| 右键托盘 → 设置... | 打开设置窗口 |
 | 右键托盘 → 退出 | 停止追踪并退出 |
 | 关闭窗口（X） | 隐藏到托盘，不退出 |
-| ◀ 前一天 / 后一天 ▶ | 切换日期 |
-| 跳转下拉框 | 直接跳到有记录的历史日期 |
-| 开机自启复选框 | 勾选后开机自动启动 |
+| 🌙 / ☀️ | 切换亮色/暗色主题 |
+
+### 键盘快捷键
+
+| 快捷键 | 功能 |
+|--------|------|
+| ← → | 前一天 / 后一天 |
+| Ctrl+D | 跳转到今天 |
+| Ctrl+F | 聚焦搜索框 |
+| Ctrl+T | 切换亮色/暗色主题 |
+| Escape | 清除搜索 |
 
 ## 项目结构
 
 ```
 app_usage_tracker/
-├── main.py              # 入口：tkinter 主循环 + pystray 托盘线程
+├── main.py              # 入口：tkinter 主循环 + pystray 托盘
 ├── tracker.py           # 前台窗口追踪（主线程 root.after 轮询）
-├── database.py          # SQLite 数据层（含旧数据自动迁移）
-├── gui.py               # tkinter 统计面板
-├── tray_icon.py         # pystray 系统托盘
-├── config.py            # 配置常量与路径
-├── testify2.png         # 托盘图标
+├── database.py          # SQLite 数据层 + 旧数据自动迁移 + 进程信息持久化
+├── gui.py               # tkinter 统计面板 + 柱状图 + 图标提取 + 设置窗口
+├── tray_icon.py         # pystray 系统托盘（左键打开 + 右键菜单）
+├── config.py            # 配置常量、版本号、更新日志、帮助文本
+├── testify2.png         # 托盘/窗口图标
 ├── app.ico              # EXE 图标
 ├── AppUsageTracker.spec # PyInstaller 构建配置
 └── requirements.txt     # Python 依赖
 ```
 
-## 架构说明
-
-- **系统托盘** — pystray 运行在独立 daemon 线程，托盘回调通过 `root.after(0, ...)` 安全切换到 tkinter 主线程，避免跨线程 GIL 冲突
-- **窗口追踪** — `root.after(3000, callback)` 在主线程轮询前台窗口，无独立线程，消除 `PyEval_RestoreThread` 致命错误
-- **数据存储** — SQLite + JSON 设置文件，统一存放在 `%USERPROFILE%\.app_usage_tracker\`，源码运行与 EXE 运行共享同一份数据
-- **设置持久化** — `settings.json` 保存轮询间隔、空闲阈值、启动最小化等偏好，`config.py` 启动时自动加载
-- **图标** — 托盘图标与窗口图标均使用 `testify2.png`，EXE 图标使用同图生成的 `app.ico`
-
 ## 技术栈
 
-Python 3.12 + tkinter + pystray + Pillow + pywin32 + psutil + SQLite
+Python 3.12 + tkinter + pystray + Pillow + pywin32 + psutil + SQLite + sv_ttk
+
+## 架构说明
+
+- **系统托盘** — pystray 运行在独立 daemon 线程，托盘回调通过 `root.after(0, ...)` 安全切换到 tkinter 主线程
+- **窗口追踪** — `root.after(3000, callback)` 在主线程轮询前台窗口，无独立线程
+- **数据存储** — SQLite + JSON 设置文件，统一存放在 `%USERPROFILE%\.app_usage_tracker\`
+- **图标提取** — `ExtractIconEx` + `DrawIconEx` 从 exe 提取图标，三级缓存（TK → PIL → 磁盘）
+- **进程信息持久化** — `process_info` 表存储进程名→exe路径映射，历史应用即使未运行也能显示真实图标
 
 ## 故障排除
 

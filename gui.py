@@ -1,16 +1,33 @@
 import tkinter as tk
 from tkinter import ttk
 from datetime import date, timedelta
+import hashlib
 import os
 import subprocess
 
 import psutil
+import sv_ttk
+import win32con
+import win32gui
+import win32ui
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from config import STARTUP_DIR, load_settings
-from database import get_daily_summary, get_daily_total, get_available_dates
+from config import APP_VERSION, CHANGELOG, HELP_TEXT, STARTUP_DIR, load_settings
+from database import (
+    get_all_process_info,
+    get_daily_summary, get_daily_total, get_available_dates,
+    get_range_summary, get_range_total,
+)
 from tracker import _friendly_name
 
 BAT_NAME = "app_usage_tracker.bat"
+
+# Bar-chart colours — cycle through for top apps
+CHART_COLORS = [
+    "#4A90D9", "#50B86C", "#F5A623", "#9B59B6",
+    "#26A69A", "#EF5350", "#7E57C2", "#42A5F5",
+    "#EC407A", "#66BB6A",
+]
 
 
 def _secs_to_hms(seconds):
@@ -58,57 +75,359 @@ def _set_startup(enable, script_path):
             os.remove(bat_path)
 
 
+# ──────────────────────── icon extraction ────────────────────────
+
+# Caches survive across table refreshes so icons aren't re-extracted
+_icon_pil_cache = {}   # exe_path → PIL.Image
+_icon_tk_cache = {}    # app_name → ImageTk.PhotoImage (must stay alive)
+
+_DEFAULT_ICON_COLORS = [
+    (0x42, 0xA5, 0xF5),  # blue
+    (0xEF, 0x53, 0x50),  # red
+    (0x66, 0xBB, 0x6A),  # green
+    (0xFF, 0xA7, 0x26),  # orange
+    (0xAB, 0x47, 0xBC),  # purple
+    (0x26, 0xA6, 0x9A),  # teal
+    (0xEC, 0x40, 0x7A),  # pink
+    (0x78, 0x90, 0x9C),  # blue-grey
+]
+
+
+def _build_process_exe_map():
+    """Return {friendly_name: exe_path} for icon lookup.
+
+    Starts with every app ever persisted by the tracker (so historical
+    apps get their real icons even when not running), then overlays the
+    current live process scan so freshly-installed paths win.
+    """
+    # Base: every app the tracker has ever seen
+    result = get_all_process_info()
+
+    # Overlay: currently running processes (freshest paths)
+    for proc in psutil.process_iter(['pid']):
+        try:
+            friendly = _friendly_name(proc.pid)
+            if friendly and friendly not in result:
+                exe = proc.exe()
+                if exe and os.path.isfile(exe):
+                    result[friendly] = exe
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return result
+
+
+def _extract_icon_from_exe(exe_path, size=20):
+    """Extract the first icon from a Windows .exe and return a PIL Image.
+
+    Uses ExtractIconEx + DrawIconEx to render the icon at *size* pixels.
+    Returns None if extraction fails for any reason.
+    """
+    hSmall, hLarge = [], []
+    try:
+        hSmall, hLarge = win32gui.ExtractIconEx(exe_path, 0)
+    except Exception:
+        return None
+
+    # Pick the first available handle
+    hIcon = (hSmall or [None])[0] or (hLarge or [None])[0]
+    if not hIcon:
+        return None
+
+    try:
+        hdc = win32gui.GetDC(0)
+        dc = win32ui.CreateDCFromHandle(hdc)
+        memdc = dc.CreateCompatibleDC()
+        bmp = win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(dc, size, size)
+        memdc.SelectObject(bmp)
+        win32gui.DrawIconEx(
+            memdc.GetHandleOutput(), 0, 0, hIcon,
+            size, size, 0, None, win32con.DI_NORMAL,
+        )
+
+        bmInfo = bmp.GetInfo()
+        bits = bmp.GetBitmapBits(True)
+        img = Image.frombuffer(
+            "RGBA", (bmInfo["bmWidth"], bmInfo["bmHeight"]),
+            bits, "raw", "BGRA", 0, 1,
+        ).copy()  # detach from volatile buffer
+
+        memdc.DeleteDC()
+        win32gui.ReleaseDC(0, hdc)
+        return img
+    except Exception:
+        return None
+    finally:
+        # Destroy all extracted icon handles
+        for h in hSmall + hLarge:
+            if h:
+                try:
+                    win32gui.DestroyIcon(h)
+                except Exception:
+                    pass
+
+
+def _default_app_icon(name, size=20):
+    """Build a deterministic coloured icon with the app's initial letter.
+
+    Uses a hash of *name* to pick a stable background colour so the same
+    app always gets the same colour.
+    """
+    h = int(hashlib.md5(name.encode()).hexdigest()[:8], 16)
+    r, g, b = _DEFAULT_ICON_COLORS[h % len(_DEFAULT_ICON_COLORS)]
+
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # rounded-rect background
+    radius = max(size // 5, 2)
+    draw.rounded_rectangle(
+        [0, 0, size - 1, size - 1],
+        radius=radius, fill=(r, g, b, 255),
+    )
+
+    # first letter in white, centered
+    letter = name[0].upper() if name else "?"
+    try:
+        font = ImageFont.truetype("segoeui.ttf", size * 3 // 5)
+    except Exception:
+        font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), letter, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text(
+        ((size - tw) / 2, (size - th) / 2 - 1),
+        letter, fill=(255, 255, 255, 255), font=font,
+    )
+    return img
+
+
+def _get_app_icon(app_name, process_map, size=20):
+    """Return a PhotoImage icon for *app_name*, caching at every level."""
+    if app_name in _icon_tk_cache:
+        return _icon_tk_cache[app_name]
+
+    pil_img = None
+    exe_path = process_map.get(app_name)
+
+    if exe_path:
+        if exe_path in _icon_pil_cache:
+            pil_img = _icon_pil_cache[exe_path]
+        else:
+            pil_img = _extract_icon_from_exe(exe_path, size)
+            if pil_img:
+                _icon_pil_cache[exe_path] = pil_img
+
+    if pil_img is None:
+        pil_img = _default_app_icon(app_name, size)
+
+    pil_img = pil_img.resize((size, size), Image.LANCZOS)
+    photo = ImageTk.PhotoImage(pil_img)
+    _icon_tk_cache[app_name] = photo
+    return photo
+
+
+class BarChart(tk.Canvas):
+    """Horizontal bar chart drawn on a tkinter Canvas.
+
+    Displays the top N apps from the current data set with coloured bars
+    proportional to usage duration.  Supports light/dark themes.
+    """
+
+    def __init__(self, parent, **kwargs):
+        kwargs.setdefault("height", 220)
+        super().__init__(
+            parent,
+            highlightthickness=0,
+            **kwargs,
+        )
+        self._theme = "light"
+        self._font = ("", 9)
+        self.bind("<Configure>", lambda _: self._redraw())
+
+        # data cache for resize redraws
+        self._data = []
+        self._total = 0
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self._redraw()
+
+    def update_data(self, data, total):
+        """Store data and redraw.  *data* is [(name, seconds), …]."""
+        self._data = data[:10]  # top 10
+        self._total = total
+        self._redraw()
+
+    def _redraw(self):
+        self.delete("all")
+        if not self._data or self._total <= 0:
+            return
+
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 10 or h < 10:
+            return  # not yet mapped
+
+        # theme colours
+        if self._theme == "dark":
+            bg = "#1c1c1c"
+            text_fg = "#c0c0c0"
+        else:
+            bg = "#f0f0f0"
+            text_fg = "#333333"
+
+        self.configure(bg=bg)
+
+        n = len(self._data)
+        bar_area_left = 130   # reserve for name label
+        bar_area_right = w - 80  # reserve for percentage label
+        bar_area_width = bar_area_right - bar_area_left
+        row_h = min((h - 8) // max(n, 1), 20)
+        bar_h = max(row_h - 3, 4)
+
+        max_secs = max(s for _, s in self._data)
+
+        for i, (name, secs) in enumerate(self._data):
+            y = 4 + i * row_h
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+
+            # app name (truncated)
+            display_name = name if len(name) <= 14 else name[:13] + "…"
+            self.create_text(
+                bar_area_left - 6, y + bar_h / 2,
+                text=display_name,
+                anchor=tk.E,
+                fill=text_fg,
+                font=self._font,
+            )
+
+            # bar
+            bar_w = int(bar_area_width * secs / max_secs) if max_secs > 0 else 0
+            bar_w = max(bar_w, 2)  # minimum visible sliver
+            self.create_rectangle(
+                bar_area_left, y,
+                bar_area_left + bar_w, y + bar_h,
+                fill=color,
+                outline="",
+            )
+
+            # percentage + duration inside/after bar
+            pct = secs / self._total * 100
+            label = f"{pct:.1f}%  {_secs_to_hms(secs)}"
+            label_x = bar_area_left + bar_w + 4
+            if label_x + 120 > w:
+                # place inside bar if too wide
+                label_x = bar_area_left + bar_w - 8
+                anchor = tk.E
+                label_fill = "#ffffff"
+            else:
+                anchor = tk.W
+                label_fill = text_fg
+            self.create_text(
+                label_x, y + bar_h / 2,
+                text=label,
+                anchor=anchor,
+                fill=label_fill,
+                font=self._font,
+            )
+
+
 class UsageWindow:
     def __init__(self, root, script_path, tracker):
         self.root = root
         self.script_path = script_path
         self.tracker = tracker
         self.current_date = date.today()
+        self._sort_col = "使用时长"
+        self._sort_reverse = True
+
+        # view mode: "day", "week", "month"
+        self.view_mode = "day"
+        # For week/month modes, self.current_date anchors the period
+        # and _view_start / _view_end define the inclusive date range.
+
+        # theme
+        settings = load_settings()
+        self.theme = settings.get("theme", "light")
+        sv_ttk.set_theme(self.theme)
 
         root.title("应用使用时间统计")
-        root.geometry("600x450")
+        root.geometry("820x620")
+        root.minsize(680, 420)
         root.resizable(True, True)
 
-        # top bar: date nav (left) + search (right)
+        # ── top bar: view-mode selector + date nav + search + settings ──
         top_bar = ttk.Frame(root)
         top_bar.pack(fill=tk.X, padx=10, pady=(10, 0))
 
+        # view-mode segmented buttons
+        mode_frame = ttk.Frame(top_bar)
+        mode_frame.pack(side=tk.LEFT)
+
+        self._mode_btns = {}
+        for text, mode in [("日", "day"), ("周", "week"), ("月", "month")]:
+            btn = ttk.Button(
+                mode_frame,
+                text=text,
+                width=3,
+                command=lambda m=mode: self._switch_mode(m),
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 1))
+            self._mode_btns[mode] = btn
+        self._update_mode_button_style()
+
+        # date nav
         date_frame = ttk.Frame(top_bar)
-        date_frame.pack(side=tk.LEFT)
+        date_frame.pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Button(date_frame, text="◀ 前一天", command=self._prev_day).pack(side=tk.LEFT, padx=5)
-        self.date_label = tk.Label(date_frame, font=("", 12, "bold"), width=14)
-        self.date_label.pack(side=tk.LEFT, padx=10)
-        ttk.Button(date_frame, text="后一天 ▶", command=self._next_day).pack(side=tk.LEFT, padx=5)
+        ttk.Button(date_frame, text="◀", width=3, command=self._prev).pack(side=tk.LEFT, padx=1)
+        self.date_label = tk.Label(date_frame, font=("", 11, "bold"), width=26, anchor=tk.CENTER)
+        self.date_label.pack(side=tk.LEFT, padx=6)
+        ttk.Button(date_frame, text="▶", width=3, command=self._next).pack(side=tk.LEFT, padx=1)
 
-        search_frame = ttk.Frame(top_bar)
-        search_frame.pack(side=tk.RIGHT)
-        ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._apply_filter())
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=18)
-        self.search_entry.pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Button(search_frame, text="设置", command=self._open_settings).pack(side=tk.LEFT, padx=(10, 0))
+        # today / current-period jump
+        ttk.Button(date_frame, text="今天", width=4, command=self._go_today).pack(side=tk.LEFT, padx=(6, 0))
 
-        # history dropdown
+        # theme toggle
+        theme_text = "🌙" if self.theme == "light" else "☀️"
+        self.theme_btn = ttk.Button(date_frame, text=theme_text, command=self._toggle_theme, width=3)
+        self.theme_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── sub bar: history (left) + search & settings (right) ──
         sub_bar = ttk.Frame(root)
         sub_bar.pack(fill=tk.X, padx=10, pady=(5, 0))
+
+        # left: history
         ttk.Label(sub_bar, text="跳转:").pack(side=tk.LEFT)
         self.history_var = tk.StringVar()
         self.history_combo = ttk.Combobox(sub_bar, textvariable=self.history_var, width=14, state="readonly")
         self.history_combo.pack(side=tk.LEFT, padx=(5, 0))
         self.history_combo.bind("<<ComboboxSelected>>", self._on_history_select)
 
-        # table
+        # right: search + settings
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self._apply_filter())
+
+        search_frame = ttk.Frame(sub_bar)
+        search_frame.pack(side=tk.RIGHT)
+        ttk.Button(search_frame, text="⚙ 设置", command=self._open_settings, width=6).pack(side=tk.RIGHT, padx=(10, 0))
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=22)
+        self.search_entry.pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Label(search_frame, text="搜索:").pack(side=tk.RIGHT)
+
+        # ── table ──
         table_frame = ttk.Frame(root)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        columns = ("应用名称", "占比", "使用时长")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=12)
-        self.tree.heading("应用名称", text="应用名称")
-        self.tree.heading("占比", text="占比")
-        self.tree.heading("使用时长", text="使用时长")
-        self.tree.column("应用名称", width=280)
+        columns = ("占比", "使用时长")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=8)
+        # tree column #0: icon + app name
+        self.tree.heading("#0", text="应用名称  ⬍", command=lambda: self._on_column_click("应用名称"))
+        self.tree.column("#0", width=280, minwidth=150)
+        # data columns
+        self.tree.heading("占比", text="占比  ⬍", command=lambda: self._on_column_click("占比"))
+        self.tree.heading("使用时长", text="使用时长  ▼", command=lambda: self._on_column_click("使用时长"))
         self.tree.column("占比", width=100, anchor=tk.CENTER)
         self.tree.column("使用时长", width=160, anchor=tk.CENTER)
 
@@ -120,11 +439,15 @@ class UsageWindow:
 
         self.tree.bind("<Button-3>", self._on_tree_right_click)
 
-        # total label
-        self.total_label = tk.Label(root, font=("", 11, "bold"), anchor=tk.W)
-        self.total_label.pack(pady=5, padx=10, fill=tk.X)
+        # ── bar chart ──
+        self.chart = BarChart(root, height=210)
+        self.chart.pack(fill=tk.X, padx=10, pady=(0, 5))
 
-        # startup checkbox
+        # ── total label ──
+        self.total_label = tk.Label(root, font=("", 11, "bold"), anchor=tk.W)
+        self.total_label.pack(pady=2, padx=10, fill=tk.X)
+
+        # ── startup checkbox ──
         self.startup_var = tk.BooleanVar(value=_startup_enabled())
         startup_cb = ttk.Checkbutton(
             root, text="开机自启",
@@ -133,45 +456,196 @@ class UsageWindow:
         )
         startup_cb.pack(pady=5)
 
+        # ── keyboard shortcuts ──
+        root.bind("<Left>", lambda _: self._prev())
+        root.bind("<Right>", lambda _: self._next())
+        root.bind("<Control-d>", lambda _: self._go_today())
+        root.bind("<Control-f>", lambda _: self.search_entry.focus_set())
+        root.bind("<Control-t>", lambda _: self._toggle_theme())
+        root.bind("<Escape>", lambda _: self._clear_search())
+
         self._refresh()
 
-    def _prev_day(self):
-        self.current_date -= timedelta(days=1)
+    # ───────────────────────── view mode ─────────────────────────
+
+    def _switch_mode(self, mode):
+        if self.view_mode == mode:
+            return
+        self.view_mode = mode
+        # anchor to today when switching modes
+        self.current_date = date.today()
+        self._sort_col = "使用时长"
+        self._sort_reverse = True
+        self._update_mode_button_style()
         self._refresh()
 
-    def _next_day(self):
-        self.current_date += timedelta(days=1)
+    def _update_mode_button_style(self):
+        """Visually indicate which mode button is active."""
+        for mode, btn in self._mode_btns.items():
+            if mode == self.view_mode:
+                btn.state(["pressed"])  # sv_ttk uses "pressed" for active
+            else:
+                btn.state(["!pressed"])
+
+    @property
+    def _view_start(self):
+        """First date (inclusive) of the current view period."""
+        if self.view_mode == "week":
+            return self.current_date - timedelta(days=self.current_date.weekday())
+        elif self.view_mode == "month":
+            return self.current_date.replace(day=1)
+        else:
+            return self.current_date
+
+    @property
+    def _view_end(self):
+        """Last date (inclusive) of the current view period."""
+        if self.view_mode == "week":
+            return self._view_start + timedelta(days=6)
+        elif self.view_mode == "month":
+            d = self.current_date
+            if d.month == 12:
+                return d.replace(year=d.year + 1, month=1, day=1) - timedelta(days=1)
+            return d.replace(month=d.month + 1, day=1) - timedelta(days=1)
+        else:
+            return self.current_date
+
+    # ──────────────────────── navigation ─────────────────────────
+
+    def _prev(self):
+        if self.view_mode == "week":
+            self.current_date -= timedelta(days=7)
+        elif self.view_mode == "month":
+            d = self.current_date
+            if d.month == 1:
+                self.current_date = d.replace(year=d.year - 1, month=12, day=1)
+            else:
+                self.current_date = d.replace(month=d.month - 1, day=1)
+        else:
+            self.current_date -= timedelta(days=1)
         self._refresh()
+
+    def _next(self):
+        if self.view_mode == "week":
+            self.current_date += timedelta(days=7)
+        elif self.view_mode == "month":
+            d = self.current_date
+            if d.month == 12:
+                self.current_date = d.replace(year=d.year + 1, month=1, day=1)
+            else:
+                self.current_date = d.replace(month=d.month + 1, day=1)
+        else:
+            self.current_date += timedelta(days=1)
+        self._refresh()
+
+    def _go_today(self):
+        """Jump to today's view period."""
+        self.current_date = date.today()
+        self._refresh()
+
+    def _clear_search(self):
+        self.search_var.set("")
 
     def _on_history_select(self, _event):
         val = self.history_var.get()
         if val:
             self.current_date = date.fromisoformat(val)
+            self.view_mode = "day"
+            self._update_mode_button_style()
             self._refresh()
 
-    def _refresh(self):
-        d = self.current_date
-        self.date_label.config(text=str(d))
+    # ──────────────────────── data loading ────────────────────────
 
-        # update history dropdown
+    def _refresh(self):
+        start = str(self._view_start)
+        end = str(self._view_end)
+
+        # update date label
+        if self.view_mode == "week":
+            self.date_label.config(text=f"{start}  ~  {end}")
+        elif self.view_mode == "month":
+            self.date_label.config(text=f"{self.current_date.year}年{self.current_date.month:02d}月")
+        else:
+            self.date_label.config(text=str(self.current_date))
+
+        # history dropdown (always shows available days)
         dates = get_available_dates()
         self.history_combo["values"] = dates
 
-        # update table
-        self._all_rows = get_daily_summary(str(d))
-        self._total = get_daily_total(str(d))
-        self.search_var.set("")
-        self.total_label.config(text=f"当日总使用时间: {_secs_to_hms(self._total)}")
+        # fetch data
+        if self.view_mode == "day":
+            self._all_rows = get_daily_summary(start)
+            self._total = get_daily_total(start)
+        else:
+            self._all_rows = get_range_summary(start, end)
+            self._total = get_range_total(start, end)
+
+        # total label text varies by mode
+        mode_label = {"day": "当日", "week": "本周", "month": "本月"}
+        self.total_label.config(
+            text=f"{mode_label[self.view_mode]}总使用时间: {_secs_to_hms(self._total)}"
+        )
+
+        # reset sort to default (duration desc) on data refresh
+        self._sort_col = "使用时长"
+        self._sort_reverse = True
+        self._update_heading_arrows()
+
+        self.search_var.set("")  # triggers _apply_filter via trace
+
+        # update chart
+        self.chart.set_theme(self.theme)
+        self.chart.update_data(self._all_rows, self._total)
+
+    # ──────────────────────── table display ───────────────────────
 
     def _apply_filter(self):
         text = self.search_var.get().lower()
         for row in self.tree.get_children():
             self.tree.delete(row)
+
+        # Build process→exe map once per render pass (lazy, cached)
+        process_map = _build_process_exe_map()
+
         for proc, secs in self._all_rows:
             if text and text not in proc.lower():
                 continue
             pct = f"{secs / self._total * 100:.1f}%" if self._total > 0 else "—"
-            self.tree.insert("", tk.END, values=(proc, pct, _secs_to_hms(secs)))
+            photo = _get_app_icon(proc, process_map)
+            self.tree.insert(
+                "", tk.END,
+                image=photo, text=proc,
+                values=(pct, _secs_to_hms(secs)),
+            )
+
+    def _on_column_click(self, col):
+        """Sort by the clicked column, toggling direction on repeat clicks."""
+        if col == self._sort_col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = False
+
+        if col == "应用名称":
+            key = lambda r: r[0].lower()
+        else:
+            key = lambda r: r[1]
+
+        self._all_rows.sort(key=key, reverse=self._sort_reverse)
+        self._apply_filter()
+
+        self._update_heading_arrows()
+
+    def _update_heading_arrows(self):
+        """Sync heading arrow indicators with current sort state."""
+        arrows = {"应用名称": "  ⬍", "占比": "  ⬍", "使用时长": "  ⬍"}
+        arrows[self._sort_col] = "  ▼" if self._sort_reverse else "  ▲"
+        # Map internal sort-col name → tree heading column id
+        col_map = {"应用名称": "#0", "占比": "占比", "使用时长": "使用时长"}
+        for label, col_id in col_map.items():
+            self.tree.heading(col_id, text=label + arrows[label])
+
+    # ──────────────────────── context menu ────────────────────────
 
     def _on_tree_right_click(self, event):
         """Show context menu on right-click in the Treeview."""
@@ -188,28 +662,48 @@ class UsageWindow:
 
     def _view_app_location(self, item_id):
         """Open Explorer to show the location of the selected app's executable."""
-        values = self.tree.item(item_id, "values")
-        if not values:
+        app_name = self.tree.item(item_id, "text")
+        if not app_name:
             return
-        app_name = values[0]
 
         exe_path = _find_exe_path(app_name)
         if exe_path:
             try:
                 subprocess.Popen(['explorer', '/select,', exe_path])
             except Exception:
-                tk.messagebox.showerror(
-                    "错误",
-                    f"无法打开文件位置:\n{exe_path}"
-                )
+                tk.messagebox.showerror("错误", f"无法打开文件位置:\n{exe_path}")
         else:
             tk.messagebox.showinfo(
                 "未找到",
                 f"应用 \"{app_name}\" 当前未运行，无法定位其可执行文件路径。"
             )
 
+    # ──────────────────────── theme ───────────────────────────────
+
+    def _toggle_theme(self):
+        """Switch between light and dark themes, persist to settings."""
+        from config import save_settings
+        self.theme = "dark" if self.theme == "light" else "light"
+        sv_ttk.set_theme(self.theme)
+        self.theme_btn.config(text="☀️" if self.theme == "dark" else "🌙")
+        # tk.Label widgets aren't styled by sv_ttk — update manually
+        bg = "#1c1c1c" if self.theme == "dark" else "SystemButtonFace"
+        fg = "#e0e0e0" if self.theme == "dark" else "black"
+        self.date_label.config(bg=bg, fg=fg)
+        self.total_label.config(bg=bg, fg=fg)
+        # bar chart
+        self.chart.set_theme(self.theme)
+        # persist
+        s = load_settings()
+        s["theme"] = self.theme
+        save_settings(s)
+
+    # ──────────────────────── startup ─────────────────────────────
+
     def _toggle_startup(self):
         _set_startup(self.startup_var.get(), self.script_path)
+
+    # ──────────────────────── settings ────────────────────────────
 
     def _open_settings(self):
         SettingsWindow(self.root, self.tracker, self._refresh)
@@ -225,46 +719,145 @@ class SettingsWindow:
 
         win = tk.Toplevel(parent)
         win.title("设置")
-        win.geometry("360x280")
-        win.resizable(False, False)
+        win.geometry("500x420")
+        win.minsize(420, 340)
+        win.resizable(True, True)
         win.transient(parent)
         win.grab_set()
         self.win = win
 
-        frame = ttk.Frame(win, padding=15)
-        frame.pack(fill=tk.BOTH, expand=True)
+        # ── tab container ──
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
 
+        # Tab 1: 设置
+        tab_settings = ttk.Frame(notebook, padding=15)
+        notebook.add(tab_settings, text="设置")
+        self._build_settings_tab(tab_settings, s)
+
+        # Tab 2: 帮助
+        tab_help = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_help, text="帮助")
+        self._build_help_tab(tab_help)
+
+        # Tab 3: 更新日志
+        tab_changelog = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_changelog, text="更新日志")
+        self._build_changelog_tab(tab_changelog)
+
+        # Tab 4: 关于
+        tab_about = ttk.Frame(notebook, padding=15)
+        notebook.add(tab_about, text="关于")
+        self._build_about_tab(tab_about)
+
+        # ── bottom buttons (persistent across tabs) ──
+        ttk.Separator(win, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10, pady=(10, 0))
+        btn_row = ttk.Frame(win, padding=(10, 10))
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text="取消", command=win.destroy).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(btn_row, text="保存", command=self._save).pack(side=tk.RIGHT)
+
+    # ── settings tab ──
+
+    def _build_settings_tab(self, parent, s):
         # poll interval
-        row1 = ttk.Frame(frame)
+        row1 = ttk.Frame(parent)
         row1.pack(fill=tk.X, pady=3)
         ttk.Label(row1, text="轮询间隔 (秒):").pack(side=tk.LEFT)
         self.poll_var = tk.IntVar(value=s["poll_interval"])
         ttk.Spinbox(row1, from_=1, to=60, textvariable=self.poll_var, width=6).pack(side=tk.RIGHT)
 
         # idle threshold
-        row2 = ttk.Frame(frame)
+        row2 = ttk.Frame(parent)
         row2.pack(fill=tk.X, pady=3)
         ttk.Label(row2, text="空闲阈值 (分钟):").pack(side=tk.LEFT)
         self.idle_var = tk.IntVar(value=s["idle_threshold"] // 60)
         ttk.Spinbox(row2, from_=1, to=60, textvariable=self.idle_var, width=6).pack(side=tk.RIGHT)
 
         # start minimized
-        row3 = ttk.Frame(frame)
+        row3 = ttk.Frame(parent)
         row3.pack(fill=tk.X, pady=3)
         ttk.Label(row3, text="启动时最小化到托盘").pack(side=tk.LEFT)
         self.min_var = tk.BooleanVar(value=s["start_minimized"])
         ttk.Checkbutton(row3, variable=self.min_var).pack(side=tk.RIGHT)
 
-        ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
-        # CSV export
-        ttk.Button(frame, text="导出数据为 CSV...", command=self._export_csv).pack(pady=5)
+        ttk.Button(parent, text="导出数据为 CSV...", command=self._export_csv).pack(pady=5)
 
-        # save / cancel
-        btn_row = ttk.Frame(frame)
-        btn_row.pack(fill=tk.X, pady=(20, 0))
-        ttk.Button(btn_row, text="取消", command=win.destroy).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(btn_row, text="保存", command=self._save).pack(side=tk.RIGHT)
+    # ── help tab ──
+
+    def _build_help_tab(self, parent):
+        text = tk.Text(parent, wrap=tk.WORD, borderwidth=0,
+                       padx=8, pady=8, font=("", 10))
+        text.insert("1.0", HELP_TEXT)
+        text.configure(state=tk.DISABLED)  # read-only
+
+        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ── changelog tab ──
+
+    def _build_changelog_tab(self, parent):
+        text = tk.Text(parent, wrap=tk.WORD, borderwidth=0,
+                       padx=8, pady=8, font=("", 10))
+        text.tag_configure("version", font=("", 11, "bold"), foreground="#4A90D9")
+        text.tag_configure("date", font=("", 9), foreground="#888888")
+        text.tag_configure("bullet", lmargin1=20, lmargin2=30, font=("", 10))
+
+        for i, (ver, ver_date, changes) in enumerate(CHANGELOG):
+            if i > 0:
+                text.insert(tk.END, "\n")
+            text.insert(tk.END, f"v{ver}", "version")
+            text.insert(tk.END, f"    {ver_date}\n", "date")
+            for c in changes:
+                text.insert(tk.END, f"• {c}\n", "bullet")
+
+        text.configure(state=tk.DISABLED)  # read-only
+
+        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ── about tab ──
+
+    def _build_about_tab(self, parent):
+        # App icon / title area
+        title_frame = ttk.Frame(parent)
+        title_frame.pack(fill=tk.X, pady=(10, 20))
+
+        name_label = tk.Label(title_frame, text="应用使用时间追踪器",
+                              font=("", 16, "bold"))
+        name_label.pack()
+
+        ver_label = tk.Label(title_frame, text=f"v{APP_VERSION}",
+                             font=("", 10), fg="#888888")
+        ver_label.pack()
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+
+        # Info section
+        info_frame = ttk.Frame(parent, padding=(10, 5))
+        info_frame.pack(fill=tk.X)
+
+        rows = [
+            ("技术栈", "Python 3.12 + tkinter + pystray"),
+            ("数据存储", "SQLite"),
+            ("系统支持", "Windows 10 / 11"),
+            ("许可证", "MIT"),
+        ]
+        for label, value in rows:
+            row_frame = ttk.Frame(info_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=label + "：", font=("", 10, "bold")).pack(side=tk.LEFT)
+            ttk.Label(row_frame, text=value, font=("", 10)).pack(side=tk.LEFT, padx=(5, 0))
+
+    # ── actions ──
 
     def _save(self):
         from config import save_settings
