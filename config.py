@@ -48,13 +48,27 @@ _DEFAULTS = {
     "idle_threshold": 300,
     "start_minimized": False,
     "theme": "light",
+    "api_key": "",
+    "api_provider": "anthropic",
+    "api_endpoint": "",
+    "api_model": "",
+    "app_categories": {},
 }
 
 # ── App metadata (displayed in Settings → 关于 / 更新日志 / 帮助) ──
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 CHANGELOG = [
+    ("1.4.0", "2026-06-29", [
+        "新增 AI 智能分析功能（设置 → AI 分析）",
+        "新增本地分析报告：总览、Top 5 应用、变化趋势、分类统计、使用建议",
+        "新增多模型 AI 分析支持：Anthropic Claude / OpenAI / DeepSeek / Ollama",
+        "新增自定义 API 端点支持，兼容 OpenAI 协议的第三方服务",
+        "新增 AI 分析面板：显示/复制分析结果、刷新、保存为文本文件",
+        "新增 AI 配置页：API Key 输入、模型提供商选择、自定义端点/模型设置",
+        "新增应用分类映射表，支持自定义分类标签（在 settings.json 中手动编辑）",
+    ]),
     ("1.3.0", "2026-06-28", [
         "新增设置窗口多标签页：帮助、更新日志、关于",
         "新增应用图标显示（从 exe 提取真实图标，含默认图标回退）",

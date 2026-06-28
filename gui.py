@@ -14,11 +14,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from config import APP_VERSION, CHANGELOG, HELP_TEXT, STARTUP_DIR, load_settings
 from database import (
-    get_all_process_info,
+    get_all_app_names, get_all_process_info,
     get_daily_summary, get_daily_total, get_available_dates,
+    get_daily_totals_for_range,
     get_range_summary, get_range_total,
 )
 from tracker import _friendly_name
+from analysis import analyze_local, analyze_with_ai
 
 BAT_NAME = "app_usage_tracker.bat"
 
@@ -411,7 +413,8 @@ class UsageWindow:
 
         search_frame = ttk.Frame(sub_bar)
         search_frame.pack(side=tk.RIGHT)
-        ttk.Button(search_frame, text="⚙ 设置", command=self._open_settings, width=6).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(search_frame, text="⚙ 设置", command=self._open_settings, width=6).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(search_frame, text="🤖 AI 分析", command=self._open_ai_analysis, width=8).pack(side=tk.RIGHT, padx=(5, 0))
         self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=22)
         self.search_entry.pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Label(search_frame, text="搜索:").pack(side=tk.RIGHT)
@@ -708,6 +711,10 @@ class UsageWindow:
     def _open_settings(self):
         SettingsWindow(self.root, self.tracker, self._refresh)
 
+    def _open_ai_analysis(self):
+        AnalysisWindow(self.root, self.view_mode, self.current_date,
+                       self.theme)
+
 
 class SettingsWindow:
     def __init__(self, parent, tracker, on_save_callback):
@@ -749,6 +756,7 @@ class SettingsWindow:
         tab_about = ttk.Frame(notebook, padding=15)
         notebook.add(tab_about, text="关于")
         self._build_about_tab(tab_about)
+
 
         # ── bottom buttons (persistent across tabs) ──
         ttk.Separator(win, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10, pady=(10, 0))
@@ -857,6 +865,12 @@ class SettingsWindow:
             ttk.Label(row_frame, text=label + "：", font=("", 10, "bold")).pack(side=tk.LEFT)
             ttk.Label(row_frame, text=value, font=("", 10)).pack(side=tk.LEFT, padx=(5, 0))
 
+        else:
+            self._ai_endpoint_frame.pack_forget()
+            self.ai_key_label.config(text="API Key:")
+            self._ai_model_hint.config(text=f"留空则使用: {default_model}")
+
+
     # ── actions ──
 
     def _save(self):
@@ -881,3 +895,323 @@ class SettingsWindow:
         )
         if path:
             export_csv(path)
+
+
+class AnalysisWindow:
+    """Popup window showing AI/local usage analysis report."""
+
+    PROVIDERS = ["anthropic", "openai", "deepseek", "ollama", "custom"]
+    PROVIDER_LABELS = {
+        "anthropic": "Anthropic (Claude)",
+        "openai": "OpenAI (GPT)",
+        "deepseek": "DeepSeek",
+        "ollama": "Ollama (本地)",
+        "custom": "自定义兼容",
+    }
+    CATEGORY_OPTIONS = ["", "工作", "学习", "社交", "娱乐", "游戏", "工具", "其他"]
+
+    def __init__(self, parent, view_mode, anchor_date, theme):
+        self.view_mode = view_mode
+        self.anchor_date = anchor_date
+        self.theme = theme
+        self._ai_categories = {}
+
+        s = load_settings()
+
+        win = tk.Toplevel(parent)
+        win.title("AI 分析报告")
+        win.geometry("600x680")
+        win.minsize(480, 500)
+        win.resizable(True, True)
+        win.transient(parent)
+        win.grab_set()
+        self.win = win
+
+        # ── AI settings section ──
+        ai_frame = ttk.LabelFrame(win, text="AI 设置", padding=10)
+        ai_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        # row 0: provider
+        row0 = ttk.Frame(ai_frame)
+        row0.pack(fill=tk.X, pady=2)
+        ttk.Label(row0, text="API 提供商:").pack(side=tk.LEFT)
+        provider_val = s.get("api_provider", "anthropic")
+        display_val = f"{provider_val} — {self.PROVIDER_LABELS.get(provider_val, provider_val)}"
+        self.ai_provider_var = tk.StringVar(value=display_val)
+        provider_combo = ttk.Combobox(
+            row0, textvariable=self.ai_provider_var,
+            values=[f"{v} — {self.PROVIDER_LABELS[v]}" for v in self.PROVIDERS],
+            width=24, state="readonly",
+        )
+        provider_combo.pack(side=tk.RIGHT)
+        provider_combo.bind("<<ComboboxSelected>>", self._on_provider_change)
+        self._provider_combo = provider_combo
+
+        # row 1: API key
+        row1 = ttk.Frame(ai_frame)
+        row1.pack(fill=tk.X, pady=2)
+        self.ai_key_label = ttk.Label(row1, text="API Key:")
+        self.ai_key_label.pack(side=tk.LEFT)
+        self.ai_api_key_var = tk.StringVar(value=s.get("api_key", ""))
+        self.ai_key_entry = ttk.Entry(row1, textvariable=self.ai_api_key_var, width=40, show="*")
+        self.ai_key_entry.pack(side=tk.RIGHT)
+
+        ttk.Label(ai_frame, text="留空则仅使用本地分析", font=("", 8)).pack(anchor=tk.E, pady=(0, 3))
+
+        # row 2: model (optional)
+        row_model = ttk.Frame(ai_frame)
+        row_model.pack(fill=tk.X, pady=2)
+        ttk.Label(row_model, text="模型 (可选):").pack(side=tk.LEFT)
+        self.ai_model_var = tk.StringVar(value=s.get("api_model", ""))
+        ttk.Entry(row_model, textvariable=self.ai_model_var, width=40).pack(side=tk.RIGHT)
+        self._ai_model_hint = ttk.Label(ai_frame, text="", font=("", 8))
+        self._ai_model_hint.pack(anchor=tk.E, pady=(0, 3))
+
+        # row 3: custom endpoint (hidden unless provider=custom)
+        self._ai_endpoint_frame = ttk.Frame(ai_frame)
+        ttk.Label(self._ai_endpoint_frame, text="API 端点:").pack(side=tk.LEFT)
+        self.ai_endpoint_var = tk.StringVar(value=s.get("api_endpoint", ""))
+        ttk.Entry(self._ai_endpoint_frame, textvariable=self.ai_endpoint_var, width=40).pack(side=tk.RIGHT)
+        self._endpoint_hint = ttk.Label(ai_frame, text="例如: https://api.openai.com", font=("", 8))
+
+        # ── App categories ──
+        cat_lf = ttk.LabelFrame(win, text="应用分类（用于分析报告中分类统计）", padding=8)
+        cat_lf.pack(fill=tk.X, padx=10, pady=(8, 0))
+
+        cat_outer = ttk.Frame(cat_lf)
+        cat_outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(cat_outer, highlightthickness=0, height=120)
+        cat_scrollbar = ttk.Scrollbar(cat_outer, orient=tk.VERTICAL, command=canvas.yview)
+        self._cat_scroll_frame = ttk.Frame(canvas)
+
+        self._cat_scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=self._cat_scroll_frame, anchor=tk.NW)
+        canvas.configure(yscrollcommand=cat_scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._ai_categories = dict(s.get("app_categories", {}))
+        self._ai_cat_vars = {}
+        self._build_category_rows()
+
+        # ── period + action buttons ──
+        action_frame = ttk.Frame(win, padding=(10, 10, 10, 5))
+        action_frame.pack(fill=tk.X)
+
+        ttk.Label(action_frame, text="分析周期:").pack(side=tk.LEFT)
+        self.period_var = tk.StringVar(value={"day": "今天", "week": "本周", "month": "本月"}[view_mode])
+        period_combo = ttk.Combobox(action_frame, textvariable=self.period_var,
+                                    values=["今天", "本周", "本月"], width=6, state="readonly")
+        period_combo.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(action_frame, text="生成分析", command=self._run_analysis).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="保存设置", command=self._save_ai_settings).pack(side=tk.LEFT, padx=5)
+
+        self.status_label = ttk.Label(action_frame, text="")
+        self.status_label.pack(side=tk.RIGHT)
+
+        ttk.Separator(win, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+
+        # ── report text ──
+        text_frame = ttk.Frame(win, padding=(10, 5, 10, 10))
+        text_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.report = tk.Text(text_frame, wrap=tk.WORD, borderwidth=0,
+                              padx=10, pady=10, font=("", 10))
+        self.report.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.report.yview)
+        self.report.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.report.tag_configure("h1", font=("", 13, "bold"), foreground="#4A90D9")
+        self.report.tag_configure("h2", font=("", 11, "bold"))
+        self.report.tag_configure("ai", font=("", 10), foreground="#2E7D32",
+                                  lmargin1=10, lmargin2=10)
+        self.report.tag_configure("hint", font=("", 9), foreground="#888888",
+                                  lmargin1=10, lmargin2=10)
+
+        # Apply initial provider visibility
+        self._on_provider_change()
+
+        # Auto-generate if API key is configured; otherwise show hint
+        if s.get("api_key", ""):
+            self._run_analysis()
+        else:
+            self._show_no_api_key_hint()
+
+    # ── AI settings helpers ──
+
+    def _on_provider_change(self, *_):
+        """Show/hide endpoint field and update model hint."""
+        provider = self.ai_provider_var.get()
+        provider = provider.split(" —")[0] if " —" in provider else provider
+
+        from analysis import _PROVIDER_PRESETS
+        default_models = {k: v[1] for k, v in _PROVIDER_PRESETS.items()}
+        default_model = default_models.get(provider, "gpt-4o-mini")
+
+        if provider == "custom":
+            self._ai_endpoint_frame.pack(fill=tk.X, pady=2)
+            self._endpoint_hint.pack(anchor=tk.E, pady=(0, 3))
+            self.ai_key_label.config(text="API Key:")
+            self._ai_model_hint.config(text="留空则使用: gpt-4o-mini")
+        elif provider == "ollama":
+            self._ai_endpoint_frame.pack_forget()
+            self._endpoint_hint.pack_forget()
+            self.ai_key_label.config(text="API Key (可选):")
+            self._ai_model_hint.config(text=f"留空则使用: {default_model}")
+        else:
+            self._ai_endpoint_frame.pack_forget()
+            self._endpoint_hint.pack_forget()
+            self.ai_key_label.config(text="API Key:")
+            self._ai_model_hint.config(text=f"留空则使用: {default_model}")
+
+    def _on_category_change(self, app_name, var):
+        val = var.get()
+        if val:
+            self._ai_categories[app_name] = val
+        else:
+            self._ai_categories.pop(app_name, None)
+
+    def _build_category_rows(self):
+        for w in self._cat_scroll_frame.winfo_children():
+            w.destroy()
+        self._ai_cat_vars.clear()
+        for app_name in get_all_app_names():
+            row = ttk.Frame(self._cat_scroll_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=app_name, width=22, anchor=tk.W).pack(side=tk.LEFT)
+            var = tk.StringVar(value=self._ai_categories.get(app_name, ""))
+            self._ai_cat_vars[app_name] = var
+            combo = ttk.Combobox(row, textvariable=var, values=self.CATEGORY_OPTIONS, width=6, state="readonly")
+            combo.pack(side=tk.RIGHT)
+            combo.bind("<<ComboboxSelected>>",
+                       lambda e, n=app_name, v=var: self._on_category_change(n, v))
+
+    def _get_provider_raw(self):
+        provider_raw = self.ai_provider_var.get()
+        return provider_raw.split(" —")[0] if " —" in provider_raw else provider_raw
+
+    def _save_ai_settings(self):
+        """Save AI settings to config without closing the window."""
+        from config import save_settings
+        s = load_settings()
+        s["api_key"] = self.ai_api_key_var.get()
+        s["api_provider"] = self._get_provider_raw()
+        s["api_endpoint"] = self.ai_endpoint_var.get()
+        s["api_model"] = self.ai_model_var.get()
+        s["app_categories"] = self._ai_categories
+        save_settings(s)
+        self.status_label.config(text="设置已保存 ✓")
+
+    # ── analysis ──
+
+    def _show_no_api_key_hint(self):
+        self.report.configure(state=tk.NORMAL)
+        self.report.delete("1.0", tk.END)
+        self.report.insert(tk.END,
+            "💡 提示：在上方 AI 设置中配置 API Key，点击「保存设置」后再点击「生成分析」，即可解锁 AI 深度分析。",
+            "hint")
+        self.report.configure(state=tk.DISABLED)
+        self.status_label.config(text="未配置 API Key")
+
+    def _run_analysis(self):
+        self.report.configure(state=tk.NORMAL)
+        self.report.delete("1.0", tk.END)
+        self.status_label.config(text="分析中...")
+
+        # Reload settings (may have been saved since window opened)
+        from config import load_settings
+        settings = load_settings()
+
+        # Map selected period to actual date range
+        period_map = {"今天": "day", "本周": "week", "本月": "month"}
+        mode = period_map[self.period_var.get()]
+
+        today = date.today()
+        if mode == "day":
+            cur_start = cur_end = today
+            prev_start = prev_end = today - timedelta(days=1)
+            period_label = f"今天 ({today})"
+            prev_label = "昨天"
+        elif mode == "week":
+            weekday = today.weekday()
+            cur_start = today - timedelta(days=weekday)
+            cur_end = cur_start + timedelta(days=6)
+            prev_start = cur_start - timedelta(days=7)
+            prev_end = cur_start - timedelta(days=1)
+            period_label = f"本周 ({cur_start} ~ {cur_end})"
+            prev_label = "上周"
+        else:
+            cur_start = today.replace(day=1)
+            if today.month == 12:
+                cur_end = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+            else:
+                cur_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+            prev_start = (cur_start - timedelta(days=1)).replace(day=1)
+            prev_end = cur_start - timedelta(days=1)
+            period_label = f"本月 ({today.year}年{today.month}月)"
+            prev_label = "上月"
+
+        # Fetch data
+        current = get_range_summary(str(cur_start), str(cur_end))
+        previous = get_range_summary(str(prev_start), str(prev_end))
+        daily_totals = get_daily_totals_for_range(
+            str(today - timedelta(days=6)), str(today)
+        )
+
+        categories = settings.get("app_categories", {})
+
+        data = {
+            "current": current,
+            "previous": previous,
+            "daily_totals": daily_totals,
+            "categories": categories,
+        }
+
+        # ── Local analysis (always) ──
+        self.report.insert(tk.END, "本地分析报告", "h1")
+        self.report.insert(tk.END, "\n\n")
+        local_report = analyze_local(data, period_label)
+        self.report.insert(tk.END, local_report)
+
+        # ── AI analysis (if API key configured) ──
+        api_key = settings.get("api_key", "")
+        if api_key:
+            self.report.insert(tk.END, "\n\n")
+            self.report.insert(tk.END, "🤖 AI 洞察", "h1")
+            self.report.insert(tk.END, "\n\n")
+
+            provider = settings.get("api_provider", "anthropic")
+            endpoint = settings.get("api_endpoint", "")
+            model = settings.get("api_model", "")
+
+            try:
+                ai_result = analyze_with_ai(
+                    data, period_label, api_key,
+                    provider=provider, endpoint=endpoint, model=model,
+                )
+                if ai_result:
+                    self.report.insert(tk.END, ai_result, "ai")
+                    self.status_label.config(text="分析完成 ✓")
+                else:
+                    self.report.insert(tk.END, "AI 分析请求失败，请检查网络连接和 API Key。", "hint")
+                    self.status_label.config(text="AI 请求失败")
+            except Exception as e:
+                self.report.insert(tk.END, f"AI 分析出错: {e}", "hint")
+                self.status_label.config(text="AI 出错")
+            finally:
+                self.report.configure(state=tk.DISABLED)
+        else:
+            self.report.insert(tk.END, "\n\n")
+            self.report.insert(tk.END,
+                "💡 提示：在上方 AI 设置中配置 API Key，点击「保存设置」后再点击「生成分析」，即可解锁 AI 深度分析。",
+                "hint")
+            self.status_label.config(text="本地分析完成 ✓")
+            self.report.configure(state=tk.DISABLED)

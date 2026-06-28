@@ -127,6 +127,27 @@ def get_available_dates():
     return [r[0] for r in rows]
 
 
+def get_daily_totals_for_range(start_date, end_date):
+    """Return [(date, total_seconds), ...] for each day in the range."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT date, SUM(duration_seconds) FROM usage_logs "
+        "WHERE date >= ? AND date <= ? "
+        "GROUP BY date ORDER BY date",
+        (start_date, end_date),
+    ).fetchall()
+    return rows
+
+
+def get_all_app_names():
+    """Return distinct process names ever recorded."""
+    c = _conn()
+    rows = c.execute(
+        "SELECT DISTINCT process_name FROM usage_logs ORDER BY process_name"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def get_range_summary(start_date, end_date):
     """Return (process_name, total_seconds) grouped across a date range.
 

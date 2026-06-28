@@ -15,6 +15,7 @@ Windows 桌面应用使用时间追踪器。后台静默记录每天各应用的
 - **设置面板** — 多标签页：追踪配置 / 帮助 / 更新日志 / 关于
 - **数据导出** — 一键导出 CSV，Excel 直接打开（UTF-8 BOM 编码）
 - **亮暗主题** — 一键切换亮色/暗色主题，自适应标签
+- **AI 智能分析** — 本地规则 + 多模型 AI（Claude / GPT / DeepSeek / Ollama），生成使用习惯分析报告
 - **开机自启** — 勾选即写入 Windows 启动文件夹
 
 ## 快速开始
@@ -48,6 +49,7 @@ pyinstaller AppUsageTracker.spec
 | 右键托盘 → 退出 | 停止追踪并退出 |
 | 关闭窗口（X） | 隐藏到托盘，不退出 |
 | 🌙 / ☀️ | 切换亮色/暗色主题 |
+| 🤖 AI 分析 | 查看 AI 使用分析报告（需配置 API Key） |
 
 ### 键盘快捷键
 
@@ -59,6 +61,27 @@ pyinstaller AppUsageTracker.spec
 | Ctrl+T | 切换亮色/暗色主题 |
 | Escape | 清除搜索 |
 
+### AI 智能分析
+
+设置 → 关于 标签页中可找到 AI 分析面板。支持两种分析模式：
+
+| 模式 | 说明 |
+|------|------|
+| **本地分析** | 无需联网，基于规则分析使用模式、趋势变化、分类统计并给出建议 |
+| **云端 AI** | 调用大模型生成更深入的分析报告，支持多种提供商 |
+
+**支持的 AI 提供商：**
+
+| 提供商 | 默认模型 | 说明 |
+|--------|---------|------|
+| Anthropic | Claude Haiku 4.5 | 需在 [console.anthropic.com](https://console.anthropic.com) 获取 API Key |
+| OpenAI | GPT-4o-mini | 需在 [platform.openai.com](https://platform.openai.com) 获取 API Key |
+| DeepSeek | deepseek-chat | 需在 [platform.deepseek.com](https://platform.deepseek.com) 获取 API Key |
+| Ollama | llama3.2 | 本地运行，无需 API Key（需先安装 [Ollama](https://ollama.com)） |
+| 自定义 | 任意模型 | 兼容 OpenAI 协议的第三方 API 端点 |
+
+配置方式：设置 → AI 配置 → 输入 API Key → 选择提供商 → 保存。
+
 ## 项目结构
 
 ```
@@ -67,6 +90,7 @@ app_usage_tracker/
 ├── tracker.py           # 前台窗口追踪（主线程 root.after 轮询）
 ├── database.py          # SQLite 数据层 + 旧数据自动迁移 + 进程信息持久化
 ├── gui.py               # tkinter 统计面板 + 柱状图 + 图标提取 + 设置窗口
+├── analysis.py          # AI 分析引擎（本地规则分析 + 多模型 AI API）
 ├── tray_icon.py         # pystray 系统托盘（左键打开 + 右键菜单）
 ├── config.py            # 配置常量、版本号、更新日志、帮助文本
 ├── testify2.png         # 托盘/窗口图标
