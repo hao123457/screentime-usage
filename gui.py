@@ -734,27 +734,27 @@ class SettingsWindow:
         self.win = win
 
         # ── tab container ──
-        notebook = ttk.Notebook(win)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+        tab_control = ttk.Notebook(win)
+        tab_control.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
 
         # Tab 1: 设置
-        tab_settings = ttk.Frame(notebook, padding=15)
-        notebook.add(tab_settings, text="设置")
+        tab_settings = ttk.Frame(tab_control, padding=15)
+        tab_control.add(tab_settings, text="设置")
         self._build_settings_tab(tab_settings, s)
 
         # Tab 2: 帮助
-        tab_help = ttk.Frame(notebook, padding=10)
-        notebook.add(tab_help, text="帮助")
+        tab_help = ttk.Frame(tab_control, padding=10)
+        tab_control.add(tab_help, text="帮助")
         self._build_help_tab(tab_help)
 
         # Tab 3: 更新日志
-        tab_changelog = ttk.Frame(notebook, padding=10)
-        notebook.add(tab_changelog, text="更新日志")
+        tab_changelog = ttk.Frame(tab_control, padding=10)
+        tab_control.add(tab_changelog, text="更新日志")
         self._build_changelog_tab(tab_changelog)
 
         # Tab 4: 关于
-        tab_about = ttk.Frame(notebook, padding=15)
-        notebook.add(tab_about, text="关于")
+        tab_about = ttk.Frame(tab_control, padding=15)
+        tab_control.add(tab_about, text="关于")
         self._build_about_tab(tab_about)
 
 

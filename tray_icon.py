@@ -5,7 +5,7 @@ from config import ICON_PATH
 
 
 def _load_icon_image():
-    """Load testify2.png, crop top square, resize to 64x64 for tray."""
+    """Load app icon from ICON_PATH, crop to square, resize to 64x64 for tray."""
     try:
         img = Image.open(ICON_PATH).convert("RGBA")
         src_size = min(img.width, img.height)

@@ -9,3 +9,4 @@ usage.db
 venv/
 stderr.log
 *.migrated
+.idea/

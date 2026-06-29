@@ -15,7 +15,7 @@ STARTUP_DIR = os.path.join(
     os.getenv("APPDATA", ""),
     r"Microsoft\Windows\Start Menu\Programs\Startup"
 )
-ICON_PATH = os.path.join(BASE_DIR, "testify2.png")
+ICON_PATH = os.path.join(BASE_DIR, "app.ico")
 
 # Static fallback for system processes whose FileDescription may be
 # unavailable or unhelpful.  Most apps are resolved automatically via
@@ -67,7 +67,9 @@ CHANGELOG = [
         "新增自定义 API 端点支持，兼容 OpenAI 协议的第三方服务",
         "新增 AI 分析面板：显示/复制分析结果、刷新、保存为文本文件",
         "新增 AI 配置页：API Key 输入、模型提供商选择、自定义端点/模型设置",
-        "新增应用分类映射表，支持自定义分类标签（在 settings.json 中手动编辑）",
+        "新增应用分类映射表，支持自定义分类标签",
+        "修复：任务栏图标显示为 Python 图标的问题（添加 AppUserModelID + 提前 iconbitmap 调用时机）",
+        "更新：托盘与窗口图标统一使用 app.ico",
     ]),
     ("1.3.0", "2026-06-28", [
         "新增设置窗口多标签页：帮助、更新日志、关于",

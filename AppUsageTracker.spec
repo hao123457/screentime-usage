@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('testify2.png', '.')],
+    datas=[('app.ico', '.')],
     hiddenimports=['sv_ttk', 'pystray._win32', 'analysis', 'httpx'],
     hookspath=[],
     hooksconfig={},
